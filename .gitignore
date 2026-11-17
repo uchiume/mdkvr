@@ -1,0 +1,34 @@
+# Visual Studio
+.vs/
+*.user
+*.aps
+*.suo
+*.VC.db
+*.VC.opendb
+ipch/
+
+# Build output
+x64/
+Win32/
+Debug/
+Release/
+*.obj
+*.pch
+*.pdb
+*.idb
+*.ilk
+*.iobj
+*.ipdb
+*.res
+*.tlog
+*.log
+*.recipe
+*.exe
+*.dll
+*.lib
+
+# VS Code
+.vscode/
+
+# Image editor work files
+*.xcf
