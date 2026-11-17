@@ -1,4 +1,0 @@
-# Visual Studio saves resource scripts as UTF-16 LE with BOM.
-# Store them as UTF-8 in the repository so diffs stay readable,
-# and convert back to UTF-16 in the working tree.
-*.rc text working-tree-encoding=UTF-16LE-BOM eol=crlf
