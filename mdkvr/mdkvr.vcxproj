@@ -108,19 +108,18 @@
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>../../thirdparty/glm;../../thirdparty/glew/include;../../openvr/headers;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>../../thirdparty/glm;../../thirdparty/glew/include;../../OpenXR/build/include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EntryPointSymbol>wmainCRTStartup</EntryPointSymbol>
-      <AdditionalLibraryDirectories>..\..\thirdparty\glew\lib\Release\x64;..\..\openvr\lib\win64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>glew32.lib;opengl32.lib;openvr_api.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>..\..\thirdparty\glew\lib\Release\x64;..\..\OpenXR\build\src\loader\Debug;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>glew32.lib;opengl32.lib;openxr_loaderd.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>copy /Y "$(ProjectDir)..\..\thirdparty\glew\bin\Release\x64\glew32.dll" "$(OutDir)"
-copy /Y "$(ProjectDir)..\..\openvr\bin\win64\openvr_api.dll" "$(OutDir)"</Command>
+      <Command>copy /Y "$(ProjectDir)..\..\thirdparty\glew\bin\Release\x64\glew32.dll" "$(OutDir)"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -130,7 +129,7 @@ copy /Y "$(ProjectDir)..\..\openvr\bin\win64\openvr_api.dll" "$(OutDir)"</Comman
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>../../thirdparty/glm;../../thirdparty/glew/include;../../openvr/headers;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>../../thirdparty/glm;../../thirdparty/glew/include;../../OpenXR/build/include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>Use</PrecompiledHeader>
@@ -139,12 +138,11 @@ copy /Y "$(ProjectDir)..\..\openvr\bin\win64\openvr_api.dll" "$(OutDir)"</Comman
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>..\..\thirdparty\glew\lib\Release\x64;..\..\openvr\lib\win64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>glew32.lib;opengl32.lib;openvr_api.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>..\..\thirdparty\glew\lib\Release\x64;..\..\OpenXR\build\src\loader\Release;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>glew32.lib;opengl32.lib;openxr_loader.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>copy /Y "$(ProjectDir)..\..\thirdparty\glew\bin\Release\x64\glew32.dll" "$(OutDir)"
-copy /Y "$(ProjectDir)..\..\openvr\bin\win64\openvr_api.dll" "$(OutDir)"</Command>
+      <Command>copy /Y "$(ProjectDir)..\..\thirdparty\glew\bin\Release\x64\glew32.dll" "$(OutDir)"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>

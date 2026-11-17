@@ -85,8 +85,8 @@ IDR_CUBE_TGA            RCDATA                  "res\\Cube.tga"
 //
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,0,1,0
- PRODUCTVERSION 0,0,1,0
+ FILEVERSION 0,0,2,0
+ PRODUCTVERSION 0,0,2,0
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -103,12 +103,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "matsuda.dkobo"
             VALUE "FileDescription", "vr sample"
-            VALUE "FileVersion", "0.0.1.0"
+            VALUE "FileVersion", "0.0.2.0"
             VALUE "InternalName", "mdkvr.exe"
             VALUE "LegalCopyright", "Copyright (C) 2026"
             VALUE "OriginalFilename", "mdkvr.exe"
             VALUE "ProductName", "mdkvr"
-            VALUE "ProductVersion", "0.0.1.0"
+            VALUE "ProductVersion", "0.0.2.0"
         END
     END
     BLOCK "VarFileInfo"

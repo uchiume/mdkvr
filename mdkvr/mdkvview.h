@@ -3,7 +3,12 @@
 
 #include <GL/glew.h>
 #include <glm/glm.hpp>
-#include <openvr.h>
+#include <vector>
+
+#define XR_USE_PLATFORM_WIN32
+#define XR_USE_GRAPHICS_API_OPENGL
+#include <openxr/openxr.h>
+#include <openxr/openxr_platform.h>
 
 extern HINSTANCE g_hInst;
 
@@ -19,6 +24,13 @@ public:
 	static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 private:
+	enum EEye
+	{
+		Eye_Left = 0,
+		Eye_Right = 1,
+		Eye_Count = 2,
+	};
+
 	struct FramebufferDesc
 	{
 		GLuint m_nDepthBufferId;
@@ -26,29 +38,32 @@ private:
 		GLuint m_nRenderFramebufferId;
 		GLuint m_nResolveTextureId;
 		GLuint m_nResolveFramebufferId;
+		GLuint m_nSwapchainFramebufferId;		// swapchain image を貼り付けて blit する先
+		XrSwapchain m_swapchain;
+		std::vector<XrSwapchainImageOpenGLKHR> m_swapchainImages;
 	};
 
 	bool InitGL();
 	void TermGL();
 
-	// VR
+	// XR
 	bool InitVR();
 	void TermVR();
 	void ProcessVREvents();
-	void UpdateHMDMatrixPose();
-	glm::mat4 GetHMDMatrixProjectionEye(vr::Hmd_Eye nEye);
-	glm::mat4 GetHMDMatrixPoseEye(vr::Hmd_Eye nEye);
-	glm::mat4 GetCurrentViewMatrix(vr::Hmd_Eye nEye);
-	static glm::mat4 ConvertSteamVRMatrix(const vr::HmdMatrix34_t& matPose);
-	static glm::mat4 ConvertSteamVRMatrix(const vr::HmdMatrix44_t& mat);
+	bool UpdateHMDMatrixPose(XrTime predictedDisplayTime);
+	glm::mat4 GetHMDMatrixProjectionEye(EEye nEye);
+	glm::mat4 GetHMDMatrixPoseEye(EEye nEye);
+	glm::mat4 GetCurrentViewMatrix(EEye nEye);
+	static glm::mat4 ConvertXrPose(const XrPosef& pose);
+	bool ShowXrError(XrResult result, const char* pszFunction);
 
 	// Render targets
 	bool SetupStereoRenderTargets();
 	bool CreateFrameBuffer(int nWidth, int nHeight, FramebufferDesc& desc);
 	void DeleteFrameBuffer(FramebufferDesc& desc);
 	bool SetupCompanionWindow();
-	void RenderStereoTargets();
-	void RenderEye(vr::Hmd_Eye nEye, FramebufferDesc& desc);
+	bool RenderStereoTargets(std::vector<XrCompositionLayerProjectionView>& projectionViews);
+	bool RenderEye(EEye nEye, FramebufferDesc& desc);
 	void RenderCompanionWindow();
 
 	HWND m_hWnd;
@@ -59,11 +74,21 @@ private:
 	int m_nWidth;	// companion window client size
 	int m_nHeight;
 
-	vr::IVRSystem* m_pHMD;
-	vr::TrackedDevicePose_t m_rTrackedDevicePose[vr::k_unMaxTrackedDeviceCount];
-	glm::mat4 m_mat4HMDPose;
-	glm::mat4 m_mat4EyePosLeft;
-	glm::mat4 m_mat4EyePosRight;
+	// OpenXR
+	XrInstance m_instance;
+	XrSystemId m_systemId;
+	XrSession m_session;
+	XrSpace m_appSpace;
+	XrViewConfigurationType m_viewConfigType;
+	XrEnvironmentBlendMode m_blendMode;
+	XrSessionState m_sessionState;
+	bool m_bSessionRunning;
+	int64_t m_nColorSwapchainFormat;
+	std::vector<XrViewConfigurationView> m_configViews;
+	std::vector<XrView> m_views;
+
+	glm::mat4 m_mat4EyePosLeft;		// view matrix (左目)
+	glm::mat4 m_mat4EyePosRight;	// view matrix (右目)
 	glm::mat4 m_mat4ProjectionLeft;
 	glm::mat4 m_mat4ProjectionRight;
 	float m_fNearClip;
