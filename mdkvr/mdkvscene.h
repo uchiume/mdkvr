@@ -1,7 +1,7 @@
 #ifndef MDKVSCENE_H
 #define MDKVSCENE_H
 
-#include <GL/glew.h>
+#include <vulkan/vulkan.h>
 #include <glm/glm.hpp>
 #include <cmath>
 #include <cstring>
@@ -47,41 +47,65 @@ struct PackedVertex
 	}
 };
 
+// CMdkvView が作成した Vulkan のオブジェクト
+struct MdkvVulkanContext
+{
+	VkPhysicalDevice physicalDevice;
+	VkDevice device;
+	VkQueue queue;
+	VkCommandPool commandPool;
+	VkRenderPass renderPass;
+	VkSampleCountFlagBits samples;
+};
+
 class CMdkvScene
 {
 public:
+	// 左右の目で別々の行列を使うので、ユニフォームバッファは目の数だけ領域を持つ
+	static const uint32_t MAX_VIEWS = 2;
+
 	CMdkvScene();
 	virtual ~CMdkvScene();
 
-	bool Init();
-	void Draw(const glm::mat4& matProjection, const glm::mat4& matView);
+	bool Init(const MdkvVulkanContext& context);
+	void Draw(VkCommandBuffer commandBuffer, VkExtent2D extent, uint32_t nView, const glm::mat4& matProjection, const glm::mat4& matView);
 	void Term();
 
-	// リソース (TEXTFILE) からシェーダを読み込んでプログラムを作成する
-	static GLuint CreateProgram(int nVertResID, int nFragResID);
-
 private:
-	static bool LoadShader(HINSTANCE hInst, int nResID, char** ppBuf);
-	static GLuint CompileShader(GLenum nType, int nResID);
-
-	GLuint m_programID;
-	GLuint m_vertexbufferID;
-	GLuint m_elementbufferID;
-	GLuint m_textureID;
-	GLuint m_VertexArrayID;
-	GLsizei m_nIndexCount;
-	GLint m_MatrixID;
-	GLint m_ViewMatrixID;
-	GLint m_ModelMatrixID;
-	GLint m_LightID;
-	GLint m_TextureSamplerID;
+	MdkvVulkanContext m_context;
+	VkDescriptorSetLayout m_descriptorSetLayout;
+	VkDescriptorPool m_descriptorPool;
+	VkDescriptorSet m_descriptorSet;
+	VkPipelineLayout m_pipelineLayout;
+	VkPipeline m_pipeline;
+	VkBuffer m_vertexBuffer;
+	VkDeviceMemory m_vertexMemory;
+	VkBuffer m_indexBuffer;
+	VkDeviceMemory m_indexMemory;
+	VkBuffer m_uniformBuffer;
+	VkDeviceMemory m_uniformMemory;
+	void* m_pUniformMapped;
+	VkDeviceSize m_nUniformStride;
+	VkImage m_textureImage;
+	VkDeviceMemory m_textureMemory;
+	VkImageView m_textureView;
+	VkSampler m_sampler;
+	uint32_t m_nIndexCount;
 	glm::mat4 m_Model;
 	glm::vec3 m_LightPos;
 
 	bool LoadTexture(int nResID);
 	bool LoadModel(int nResID);
+	bool LoadShader(HINSTANCE hInst, int nResID, char** ppBuf);
 	bool LoadBinary(HINSTANCE hInst, int nResID, char** ppBuf, unsigned int* pnSize);
-	GLuint LoadTGAFromBuffer(char* buff, unsigned int nSize, unsigned char** ppbuf, unsigned short* psWidth, unsigned short* psHeight);
+	VkShaderModule CreateShaderModule(int nResID);
+	bool CreatePipeline(int nVertResID, int nFragResID);
+	bool CreateDescriptorSet();
+	bool CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, const void* pData, VkBuffer* pBuffer, VkDeviceMemory* pMemory);
+	uint32_t FindMemoryType(uint32_t nTypeBits, VkMemoryPropertyFlags properties);
+	VkCommandBuffer BeginOneTimeCommands();
+	void EndOneTimeCommands(VkCommandBuffer commandBuffer);
+	unsigned int LoadTGAFromBuffer(char* buff, unsigned int nSize, unsigned char** ppbuf, unsigned short* psWidth, unsigned short* psHeight);
 	int LoadObjFromBuffer(float fScale, char* buff, std::vector<unsigned int>& vertexIndices, std::vector<unsigned int>& uvIndices, std::vector<unsigned int>& normalIndices, std::vector<Vec3>& temp_vertices, std::vector<Vec2>& temp_uvs, std::vector<Vec3>& temp_normals, Vec3* pMax, Vec3* pMin);
 	bool ExtractObjModel(std::vector<unsigned int>& vertexIndices, std::vector<unsigned int>& uvIndices, std::vector<unsigned int>& normalIndices, std::vector<Vec3>& temp_vertices, std::vector<Vec2>& temp_uvs, std::vector<Vec3>& temp_normals, std::vector<Vec3>& out_vertices, std::vector<Vec2>& out_uvs, std::vector<Vec3>& out_normals);
 	bool ReIndexObjModel(std::vector<Vec3>& in_vertices, std::vector<Vec2>& in_uvs, std::vector<Vec3>& in_normals, std::vector<unsigned short>& out_indices, std::vector<float>& out_vertices);

@@ -1,33 +1,38 @@
 #include "pch.h"
 #include "resource.h"
-#include <GL/glew.h>
-#include <GL/wglew.h>
+#include <vulkan/vulkan.h>
+#include <vulkan/vulkan_win32.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <algorithm>
 #include <string>
-#include <cstddef>
 #include <cmath>
 #include "mdkvscene.h"
 #include "mdkvview.h"
 
-namespace
-{
-	// コンパニオンウィンドウ用頂点 (位置 xy, UV)
-	struct VertexDataWindow
-	{
-		glm::vec2 position;
-		glm::vec2 texCoord;
-	};
-}
-
 CMdkvView::CMdkvView() :
 	m_hWnd(nullptr),
-	m_hDC(nullptr),
-	m_hRC(nullptr),
 	m_pScene(nullptr),
-	m_nWidth(800),
-	m_nHeight(600),
+	m_nWidth(0),
+	m_nHeight(0),
+	m_vkInstance(VK_NULL_HANDLE),
+	m_surface(VK_NULL_HANDLE),
+	m_physicalDevice(VK_NULL_HANDLE),
+	m_device(VK_NULL_HANDLE),
+	m_nQueueFamily(0),
+	m_queue(VK_NULL_HANDLE),
+	m_surfaceFormat(),
+	m_depthFormat(VK_FORMAT_D32_SFLOAT),
+	m_colorFormat(VK_FORMAT_R8G8B8A8_UNORM),
+	m_samples(VK_SAMPLE_COUNT_1_BIT),
+	m_renderPass(VK_NULL_HANDLE),
+	m_commandPool(VK_NULL_HANDLE),
+	m_commandBuffer(VK_NULL_HANDLE),
+	m_imageAvailable(VK_NULL_HANDLE),
+	m_inFlight(VK_NULL_HANDLE),
+	m_bEyeRendered(false),
+	m_swapchain(VK_NULL_HANDLE),
+	m_extent(),
 	m_instance(XR_NULL_HANDLE),
 	m_systemId(XR_NULL_SYSTEM_ID),
 	m_session(XR_NULL_HANDLE),
@@ -46,12 +51,7 @@ CMdkvView::CMdkvView() :
 	m_nRenderWidth(0),
 	m_nRenderHeight(0),
 	m_leftEyeDesc(),
-	m_rightEyeDesc(),
-	m_unCompanionProgramID(0),
-	m_unCompanionVAO(0),
-	m_glCompanionVertBuffer(0),
-	m_glCompanionIndexBuffer(0),
-	m_nCompanionIndexSize(0)
+	m_rightEyeDesc()
 {
 }
 
@@ -77,15 +77,11 @@ LRESULT CALLBACK CMdkvView::WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 	switch (msg) {
 	case WM_CREATE:
 		break;
-	case WM_SIZE:
-		thisPtr->m_nWidth = LOWORD(lParam);
-		thisPtr->m_nHeight = HIWORD(lParam);
-		break;
 	case WM_CLOSE:
 		::DestroyWindow(hWnd);
 		break;
 	case WM_DESTROY:
-		thisPtr->TermGL();
+		thisPtr->TermVulkan();
 		::PostQuitMessage(0);
 		break;
 	default:
@@ -127,9 +123,25 @@ bool CMdkvView::Init(int nWidth, int nHeight)
 		return false;
 	}
 
-	if (!InitGL())
+	m_nWidth = nWidth;	// companion window size
+	m_nHeight = nHeight;
+
+	// OpenXR → Vulkan → OpenXR セッションの順に初期化する (InitVR の中で InitVulkan を呼ぶ)
+	bool bResult = InitVR() && SetupStereoRenderTargets();
+	if (bResult)
 	{
-		::DestroyWindow(m_hWnd);
+		MdkvVulkanContext context = { m_physicalDevice, m_device, m_queue, m_commandPool, m_renderPass, m_samples };
+		m_pScene = new CMdkvScene();
+		bResult = m_pScene->Init(context);
+	}
+	if (bResult)
+	{
+		bResult = SetupCompanionWindow();
+	}
+
+	if (!bResult)
+	{
+		::DestroyWindow(m_hWnd);	// WM_DESTROY で TermVulkan が呼ばれる
 		m_hWnd = NULL;
 		return false;
 	}
@@ -139,126 +151,221 @@ bool CMdkvView::Init(int nWidth, int nHeight)
 	return true;
 }
 
-bool CMdkvView::InitGL()
+bool CMdkvView::ShowError(const char* pszMessage)
 {
-	m_hDC = ::GetDC(m_hWnd);
-	if (m_hDC == NULL)
+	::MessageBoxA(m_hWnd, pszMessage, "MDKVR Error", MB_OK | MB_ICONERROR);
+	return false;
+}
+
+//-----------------------------------------------------------------------------
+// Vulkan
+//-----------------------------------------------------------------------------
+bool CMdkvView::InitVulkan(XrGraphicsRequirementsVulkan2KHR& requirements)
+{
+	XrResult xrResult;
+	VkResult vkResult = VK_SUCCESS;
+
+	// OpenXR 経由で Vulkan のインスタンスとデバイスを作るための関数を取得する
+	PFN_xrCreateVulkanInstanceKHR pfnCreateVulkanInstanceKHR = nullptr;
+	PFN_xrGetVulkanGraphicsDevice2KHR pfnGetVulkanGraphicsDevice2KHR = nullptr;
+	PFN_xrCreateVulkanDeviceKHR pfnCreateVulkanDeviceKHR = nullptr;
+	if (XR_FAILED(xrGetInstanceProcAddr(m_instance, "xrCreateVulkanInstanceKHR", reinterpret_cast<PFN_xrVoidFunction*>(&pfnCreateVulkanInstanceKHR)))
+		|| XR_FAILED(xrGetInstanceProcAddr(m_instance, "xrGetVulkanGraphicsDevice2KHR", reinterpret_cast<PFN_xrVoidFunction*>(&pfnGetVulkanGraphicsDevice2KHR)))
+		|| XR_FAILED(xrGetInstanceProcAddr(m_instance, "xrCreateVulkanDeviceKHR", reinterpret_cast<PFN_xrVoidFunction*>(&pfnCreateVulkanDeviceKHR))))
 	{
-		return false;
+		return ShowError("Failed to get the OpenXR Vulkan functions.");
 	}
 
-	PIXELFORMATDESCRIPTOR pfd;
-	memset(&pfd, 0, sizeof(pfd));
-	pfd.nSize = sizeof(pfd);
-	pfd.nVersion = 1;
-	pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
-	pfd.iPixelType = PFD_TYPE_RGBA;
-	pfd.cColorBits = 32;
-	pfd.cDepthBits = 24;
-	pfd.cStencilBits = 8;
-	pfd.iLayerType = PFD_MAIN_PLANE;
-
-	int nPixelFormat = ::ChoosePixelFormat(m_hDC, &pfd);
-	if (nPixelFormat == 0)
+	// Instance (コンパニオンウィンドウ用にサーフェスの拡張を有効にする)
+	uint32_t nApiVersion = VK_API_VERSION_1_0;
+	if (requirements.minApiVersionSupported > XR_MAKE_VERSION(1, 0, 0))
 	{
-		return false;
+		nApiVersion = VK_MAKE_API_VERSION(0, XR_VERSION_MAJOR(requirements.minApiVersionSupported), XR_VERSION_MINOR(requirements.minApiVersionSupported), 0);
+	}
+	const char* instanceExtensions[] = { VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME };
+	VkApplicationInfo appInfo = {};
+	appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+	appInfo.pApplicationName = "MDKVR";
+	appInfo.apiVersion = nApiVersion;
+	VkInstanceCreateInfo instanceInfo = {};
+	instanceInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+	instanceInfo.pApplicationInfo = &appInfo;
+	instanceInfo.enabledExtensionCount = (uint32_t)_countof(instanceExtensions);
+	instanceInfo.ppEnabledExtensionNames = instanceExtensions;
+
+	XrVulkanInstanceCreateInfoKHR xrInstanceInfo{ XR_TYPE_VULKAN_INSTANCE_CREATE_INFO_KHR };
+	xrInstanceInfo.systemId = m_systemId;
+	xrInstanceInfo.pfnGetInstanceProcAddr = &vkGetInstanceProcAddr;
+	xrInstanceInfo.vulkanCreateInfo = &instanceInfo;
+	xrResult = pfnCreateVulkanInstanceKHR(m_instance, &xrInstanceInfo, &m_vkInstance, &vkResult);
+	if (XR_FAILED(xrResult))
+	{
+		return ShowXrError(xrResult, "xrCreateVulkanInstanceKHR");
+	}
+	if (vkResult != VK_SUCCESS)
+	{
+		return ShowError("vkCreateInstance failed.");
 	}
 
-	if (!::SetPixelFormat(m_hDC, nPixelFormat, &pfd))
+	// Surface
+	VkWin32SurfaceCreateInfoKHR surfaceInfo = {};
+	surfaceInfo.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+	surfaceInfo.hinstance = g_hInst;
+	surfaceInfo.hwnd = m_hWnd;
+	if (vkCreateWin32SurfaceKHR(m_vkInstance, &surfaceInfo, NULL, &m_surface) != VK_SUCCESS)
 	{
-		return false;
+		return ShowError("vkCreateWin32SurfaceKHR failed.");
 	}
 
-	m_hRC = ::wglCreateContext(m_hDC);
-	if (m_hRC == NULL)
+	// GPU は HMD がつながっているものを OpenXR に決めてもらう
+	XrVulkanGraphicsDeviceGetInfoKHR deviceGetInfo{ XR_TYPE_VULKAN_GRAPHICS_DEVICE_GET_INFO_KHR };
+	deviceGetInfo.systemId = m_systemId;
+	deviceGetInfo.vulkanInstance = m_vkInstance;
+	xrResult = pfnGetVulkanGraphicsDevice2KHR(m_instance, &deviceGetInfo, &m_physicalDevice);
+	if (XR_FAILED(xrResult))
 	{
-		return false;
+		return ShowXrError(xrResult, "xrGetVulkanGraphicsDevice2KHR");
 	}
 
-	if (!::wglMakeCurrent(m_hDC, m_hRC))
+	// 描画と (コンパニオンウィンドウへの) 表示ができるキューを選ぶ
+	uint32_t nFamilyCount = 0;
+	vkGetPhysicalDeviceQueueFamilyProperties(m_physicalDevice, &nFamilyCount, NULL);
+	std::vector<VkQueueFamilyProperties> families(nFamilyCount);
+	vkGetPhysicalDeviceQueueFamilyProperties(m_physicalDevice, &nFamilyCount, families.data());
+	bool bFound = false;
+	for (uint32_t i = 0; i < nFamilyCount; i++)
 	{
-		return false;
+		VkBool32 bPresent = VK_FALSE;
+		vkGetPhysicalDeviceSurfaceSupportKHR(m_physicalDevice, i, m_surface, &bPresent);
+		if ((families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && bPresent)
+		{
+			m_nQueueFamily = i;
+			bFound = true;
+			break;
+		}
+	}
+	if (!bFound)
+	{
+		return ShowError("No Vulkan queue supports both graphics and presentation.");
 	}
 
-	glewExperimental = GL_TRUE;
-	if (::glewInit() != GLEW_OK)
+	// Logical device
+	float fPriority = 1.0f;
+	VkDeviceQueueCreateInfo queueInfo = {};
+	queueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+	queueInfo.queueFamilyIndex = m_nQueueFamily;
+	queueInfo.queueCount = 1;
+	queueInfo.pQueuePriorities = &fPriority;
+	const char* deviceExtensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+	VkDeviceCreateInfo deviceInfo = {};
+	deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+	deviceInfo.queueCreateInfoCount = 1;
+	deviceInfo.pQueueCreateInfos = &queueInfo;
+	deviceInfo.enabledExtensionCount = (uint32_t)_countof(deviceExtensions);
+	deviceInfo.ppEnabledExtensionNames = deviceExtensions;
+
+	XrVulkanDeviceCreateInfoKHR xrDeviceInfo{ XR_TYPE_VULKAN_DEVICE_CREATE_INFO_KHR };
+	xrDeviceInfo.systemId = m_systemId;
+	xrDeviceInfo.pfnGetInstanceProcAddr = &vkGetInstanceProcAddr;
+	xrDeviceInfo.vulkanCreateInfo = &deviceInfo;
+	xrDeviceInfo.vulkanPhysicalDevice = m_physicalDevice;
+	xrResult = pfnCreateVulkanDeviceKHR(m_instance, &xrDeviceInfo, &m_device, &vkResult);
+	if (XR_FAILED(xrResult))
 	{
-		return false;
+		return ShowXrError(xrResult, "xrCreateVulkanDeviceKHR");
 	}
-	glGetError(); // to clear the error caused deep in GLEW
-
-	// フレームの同期は xrWaitFrame で取るので、コンパニオンウィンドウの SwapBuffers は vsync を待たない
-	if (WGLEW_EXT_swap_control)
+	if (vkResult != VK_SUCCESS)
 	{
-		wglSwapIntervalEXT(0);
+		m_device = VK_NULL_HANDLE;
+		return ShowError("vkCreateDevice failed.");
+	}
+	vkGetDeviceQueue(m_device, m_nQueueFamily, 0, &m_queue);
+
+	// コンパニオンウィンドウの表示形式 (sRGB 変換しない UNORM を優先)
+	uint32_t nFormatCount = 0;
+	vkGetPhysicalDeviceSurfaceFormatsKHR(m_physicalDevice, m_surface, &nFormatCount, NULL);
+	std::vector<VkSurfaceFormatKHR> formats(nFormatCount);
+	vkGetPhysicalDeviceSurfaceFormatsKHR(m_physicalDevice, m_surface, &nFormatCount, formats.data());
+	if (nFormatCount == 0)
+	{
+		return ShowError("No surface format is available.");
+	}
+	m_surfaceFormat = formats[0];
+	for (const VkSurfaceFormatKHR& format : formats)
+	{
+		if (format.format == VK_FORMAT_B8G8R8A8_UNORM && format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
+		{
+			m_surfaceFormat = format;
+			break;
+		}
 	}
 
-	RECT rcClient;
-	::GetClientRect(m_hWnd, &rcClient);
-	m_nWidth = rcClient.right - rcClient.left;
-	m_nHeight = rcClient.bottom - rcClient.top;
+	// MSAA : 色と深度の両方が対応していれば 4x
+	VkPhysicalDeviceProperties properties;
+	vkGetPhysicalDeviceProperties(m_physicalDevice, &properties);
+	VkSampleCountFlags sampleCounts = properties.limits.framebufferColorSampleCounts & properties.limits.framebufferDepthSampleCounts;
+	m_samples = (sampleCounts & VK_SAMPLE_COUNT_4_BIT) ? VK_SAMPLE_COUNT_4_BIT : VK_SAMPLE_COUNT_1_BIT;
 
-	if (!InitVR())
+	// Command buffer
+	VkCommandPoolCreateInfo poolInfo = {};
+	poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+	poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+	poolInfo.queueFamilyIndex = m_nQueueFamily;
+	if (vkCreateCommandPool(m_device, &poolInfo, NULL, &m_commandPool) != VK_SUCCESS)
 	{
-		return false;
+		return ShowError("vkCreateCommandPool failed.");
+	}
+	VkCommandBufferAllocateInfo allocInfo = {};
+	allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+	allocInfo.commandPool = m_commandPool;
+	allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	allocInfo.commandBufferCount = 1;
+	if (vkAllocateCommandBuffers(m_device, &allocInfo, &m_commandBuffer) != VK_SUCCESS)
+	{
+		return ShowError("vkAllocateCommandBuffers failed.");
 	}
 
-	m_pScene = new CMdkvScene();
-	if (!m_pScene->Init())
+	// Synchronization
+	VkSemaphoreCreateInfo semaphoreInfo = {};
+	semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+	VkFenceCreateInfo fenceInfo = {};
+	fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+	fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+	if (vkCreateSemaphore(m_device, &semaphoreInfo, NULL, &m_imageAvailable) != VK_SUCCESS
+		|| vkCreateFence(m_device, &fenceInfo, NULL, &m_inFlight) != VK_SUCCESS)
 	{
-		return false;
-	}
-
-	if (!SetupStereoRenderTargets())
-	{
-		return false;
-	}
-
-	if (!SetupCompanionWindow())
-	{
-		return false;
+		return ShowError("Failed to create synchronization objects.");
 	}
 
 	return true;
 }
 
-void CMdkvView::TermGL()
+void CMdkvView::TermVulkan()
 {
-	if (m_hRC != NULL)
+	if (m_device != VK_NULL_HANDLE)
 	{
+		vkDeviceWaitIdle(m_device);
+
 		if (m_pScene != NULL)
 		{
 			m_pScene->Term();
 		}
 
-		// swapchain はセッションより先に破棄する
+		// OpenXR の swapchain はセッションより先に破棄する
 		DeleteFrameBuffer(m_leftEyeDesc);
 		DeleteFrameBuffer(m_rightEyeDesc);
 
-		if (m_unCompanionVAO != 0)
-		{
-			glDeleteVertexArrays(1, &m_unCompanionVAO);
-			m_unCompanionVAO = 0;
-		}
-		if (m_glCompanionVertBuffer != 0)
-		{
-			glDeleteBuffers(1, &m_glCompanionVertBuffer);
-			m_glCompanionVertBuffer = 0;
-		}
-		if (m_glCompanionIndexBuffer != 0)
-		{
-			glDeleteBuffers(1, &m_glCompanionIndexBuffer);
-			m_glCompanionIndexBuffer = 0;
-		}
-		if (m_unCompanionProgramID != 0)
-		{
-			glDeleteProgram(m_unCompanionProgramID);
-			m_unCompanionProgramID = 0;
-		}
+		DestroySwapchain();
+		vkDestroyFence(m_device, m_inFlight, NULL);
+		vkDestroySemaphore(m_device, m_imageAvailable, NULL);
+		vkDestroyCommandPool(m_device, m_commandPool, NULL);
+		vkDestroyRenderPass(m_device, m_renderPass, NULL);
+		m_inFlight = VK_NULL_HANDLE;
+		m_imageAvailable = VK_NULL_HANDLE;
+		m_commandBuffer = VK_NULL_HANDLE;
+		m_commandPool = VK_NULL_HANDLE;
+		m_renderPass = VK_NULL_HANDLE;
 	}
-
-	// セッションは GL コンテキストを参照しているので、コンテキストより先に破棄する
-	TermVR();
 
 	if (m_pScene != NULL)
 	{
@@ -266,18 +373,161 @@ void CMdkvView::TermGL()
 		m_pScene = NULL;
 	}
 
-	if (m_hRC != NULL)
+	// セッションは Vulkan のデバイスを参照しているので、デバイスより先に破棄する
+	TermVR();
+
+	if (m_device != VK_NULL_HANDLE)
 	{
-		::wglMakeCurrent(NULL, NULL);
-		::wglDeleteContext(m_hRC);
-		m_hRC = NULL;
+		vkDestroyDevice(m_device, NULL);
+		m_device = VK_NULL_HANDLE;
 	}
 
-	if (m_hDC != NULL)
+	if (m_vkInstance != VK_NULL_HANDLE)
 	{
-		::ReleaseDC(m_hWnd, m_hDC);
-		m_hDC = NULL;
+		if (m_surface != VK_NULL_HANDLE)
+		{
+			vkDestroySurfaceKHR(m_vkInstance, m_surface, NULL);
+		}
+		vkDestroyInstance(m_vkInstance, NULL);
+		m_surface = VK_NULL_HANDLE;
+		m_vkInstance = VK_NULL_HANDLE;
 	}
+
+	if (m_instance != XR_NULL_HANDLE)
+	{
+		xrDestroyInstance(m_instance);
+		m_instance = XR_NULL_HANDLE;
+	}
+}
+
+bool CMdkvView::CreateRenderPass()
+{
+	// MSAA の色と深度に描き、resolve 先 (1 サンプル) を swapchain へのコピー元にする。
+	// MSAA を使わないときは resolve 先に直接描く。
+	const bool bMultisample = m_samples != VK_SAMPLE_COUNT_1_BIT;
+
+	VkAttachmentDescription attachments[3] = {};
+	// 0 : 色 (MSAA のときは MSAA バッファ、そうでなければ resolve 先)
+	attachments[0].format = m_colorFormat;
+	attachments[0].samples = m_samples;
+	attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	attachments[0].storeOp = bMultisample ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE;
+	attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	attachments[0].finalLayout = bMultisample ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+	// 1 : 深度
+	attachments[1].format = m_depthFormat;
+	attachments[1].samples = m_samples;
+	attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+	// 2 : resolve 先 (MSAA のときだけ)
+	attachments[2].format = m_colorFormat;
+	attachments[2].samples = VK_SAMPLE_COUNT_1_BIT;
+	attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+	attachments[2].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	attachments[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	attachments[2].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	attachments[2].finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+
+	VkAttachmentReference colorRef = { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+	VkAttachmentReference depthRef = { 1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
+	VkAttachmentReference resolveRef = { 2, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+	VkSubpassDescription subpass = {};
+	subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+	subpass.colorAttachmentCount = 1;
+	subpass.pColorAttachments = &colorRef;
+	subpass.pResolveAttachments = bMultisample ? &resolveRef : NULL;
+	subpass.pDepthStencilAttachment = &depthRef;
+
+	VkSubpassDependency dependencies[2] = {};
+	// 前のフレームの描画・コピーが終わってから書き込む
+	dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+	dependencies[0].dstSubpass = 0;
+	dependencies[0].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
+	dependencies[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+	dependencies[0].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	// 描き終えた resolve 先を、後のコピー (swapchain、コンパニオンウィンドウ) で読む
+	dependencies[1].srcSubpass = 0;
+	dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+	dependencies[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	dependencies[1].dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+	dependencies[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+	dependencies[1].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+	VkRenderPassCreateInfo renderPassInfo = {};
+	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+	renderPassInfo.attachmentCount = bMultisample ? 3 : 2;
+	renderPassInfo.pAttachments = attachments;
+	renderPassInfo.subpassCount = 1;
+	renderPassInfo.pSubpasses = &subpass;
+	renderPassInfo.dependencyCount = 2;
+	renderPassInfo.pDependencies = dependencies;
+	if (vkCreateRenderPass(m_device, &renderPassInfo, NULL, &m_renderPass) != VK_SUCCESS)
+	{
+		return ShowError("vkCreateRenderPass failed.");
+	}
+	return true;
+}
+
+bool CMdkvView::CreateImage(VkFormat format, VkSampleCountFlagBits samples, VkImageUsageFlags usage, VkImageAspectFlags aspect,
+	VkImage* pImage, VkDeviceMemory* pMemory, VkImageView* pView)
+{
+	VkImageCreateInfo imageInfo = {};
+	imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	imageInfo.imageType = VK_IMAGE_TYPE_2D;
+	imageInfo.format = format;
+	imageInfo.extent = { m_nRenderWidth, m_nRenderHeight, 1 };
+	imageInfo.mipLevels = 1;
+	imageInfo.arrayLayers = 1;
+	imageInfo.samples = samples;
+	imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+	imageInfo.usage = usage;
+	imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	if (vkCreateImage(m_device, &imageInfo, NULL, pImage) != VK_SUCCESS)
+	{
+		return false;
+	}
+	VkMemoryRequirements memReq;
+	vkGetImageMemoryRequirements(m_device, *pImage, &memReq);
+	VkMemoryAllocateInfo allocInfo = {};
+	allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	allocInfo.allocationSize = memReq.size;
+	allocInfo.memoryTypeIndex = FindMemoryType(memReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+	if (vkAllocateMemory(m_device, &allocInfo, NULL, pMemory) != VK_SUCCESS)
+	{
+		return false;
+	}
+	vkBindImageMemory(m_device, *pImage, *pMemory, 0);
+
+	VkImageViewCreateInfo viewInfo = {};
+	viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	viewInfo.image = *pImage;
+	viewInfo.format = format;
+	viewInfo.subresourceRange = { aspect, 0, 1, 0, 1 };
+	return vkCreateImageView(m_device, &viewInfo, NULL, pView) == VK_SUCCESS;
+}
+
+uint32_t CMdkvView::FindMemoryType(uint32_t nTypeBits, VkMemoryPropertyFlags properties)
+{
+	VkPhysicalDeviceMemoryProperties memProperties;
+	vkGetPhysicalDeviceMemoryProperties(m_physicalDevice, &memProperties);
+	for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++)
+	{
+		if ((nTypeBits & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties)
+		{
+			return i;
+		}
+	}
+	return 0;
 }
 
 //-----------------------------------------------------------------------------
@@ -301,7 +551,7 @@ bool CMdkvView::InitVR()
 {
 	XrResult result;
 
-	// OpenGL 拡張がランタイムで使えるか確認する
+	// Vulkan 拡張がランタイムで使えるか確認する
 	{
 		uint32_t nCount = 0;
 		result = xrEnumerateInstanceExtensionProperties(nullptr, 0, &nCount, nullptr);
@@ -316,23 +566,22 @@ bool CMdkvView::InitVR()
 			return ShowXrError(result, "xrEnumerateInstanceExtensionProperties");
 		}
 		bool bFound = std::any_of(extensions.begin(), extensions.end(), [](const XrExtensionProperties& ext) {
-			return strcmp(ext.extensionName, XR_KHR_OPENGL_ENABLE_EXTENSION_NAME) == 0;
+			return strcmp(ext.extensionName, XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME) == 0;
 		});
 		if (!bFound)
 		{
-			::MessageBoxA(m_hWnd, "The OpenXR runtime does not support " XR_KHR_OPENGL_ENABLE_EXTENSION_NAME ".", "OpenXR Error", MB_OK | MB_ICONERROR);
-			return false;
+			return ShowError("The OpenXR runtime does not support " XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME ".");
 		}
 	}
 
 	// Instance
 	{
-		const char* extensionNames[] = { XR_KHR_OPENGL_ENABLE_EXTENSION_NAME };
+		const char* extensionNames[] = { XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME };
 		XrInstanceCreateInfo createInfo{ XR_TYPE_INSTANCE_CREATE_INFO };
 		createInfo.enabledExtensionCount = (uint32_t)_countof(extensionNames);
 		createInfo.enabledExtensionNames = extensionNames;
 		strcpy_s(createInfo.applicationInfo.applicationName, "mdkvr");
-		createInfo.applicationInfo.applicationVersion = XR_MAKE_VERSION(0, 0, 2);
+		createInfo.applicationInfo.applicationVersion = XR_MAKE_VERSION(0, 0, 3);
 		createInfo.applicationInfo.apiVersion = XR_API_VERSION_1_0;
 		result = xrCreateInstance(&createInfo, &m_instance);
 		if (XR_FAILED(result))
@@ -376,39 +625,37 @@ bool CMdkvView::InitVR()
 		m_blendMode = blendModes[0];
 	}
 
-	// OpenGL の要求バージョンを確認する (xrCreateSession の前に呼ぶ必要がある)
+	// Vulkan の要求バージョンを取得して、Vulkan を初期化する (xrCreateSession の前に必要)
 	{
-		PFN_xrGetOpenGLGraphicsRequirementsKHR pfnGetOpenGLGraphicsRequirementsKHR = nullptr;
-		result = xrGetInstanceProcAddr(m_instance, "xrGetOpenGLGraphicsRequirementsKHR",
-			reinterpret_cast<PFN_xrVoidFunction*>(&pfnGetOpenGLGraphicsRequirementsKHR));
+		PFN_xrGetVulkanGraphicsRequirements2KHR pfnGetVulkanGraphicsRequirements2KHR = nullptr;
+		result = xrGetInstanceProcAddr(m_instance, "xrGetVulkanGraphicsRequirements2KHR",
+			reinterpret_cast<PFN_xrVoidFunction*>(&pfnGetVulkanGraphicsRequirements2KHR));
 		if (XR_FAILED(result))
 		{
 			return ShowXrError(result, "xrGetInstanceProcAddr");
 		}
 
-		XrGraphicsRequirementsOpenGLKHR graphicsRequirements{ XR_TYPE_GRAPHICS_REQUIREMENTS_OPENGL_KHR };
-		result = pfnGetOpenGLGraphicsRequirementsKHR(m_instance, m_systemId, &graphicsRequirements);
+		XrGraphicsRequirementsVulkan2KHR graphicsRequirements{ XR_TYPE_GRAPHICS_REQUIREMENTS_VULKAN2_KHR };
+		result = pfnGetVulkanGraphicsRequirements2KHR(m_instance, m_systemId, &graphicsRequirements);
 		if (XR_FAILED(result))
 		{
-			return ShowXrError(result, "xrGetOpenGLGraphicsRequirementsKHR");
+			return ShowXrError(result, "xrGetVulkanGraphicsRequirements2KHR");
 		}
 
-		GLint nMajor = 0;
-		GLint nMinor = 0;
-		glGetIntegerv(GL_MAJOR_VERSION, &nMajor);
-		glGetIntegerv(GL_MINOR_VERSION, &nMinor);
-		if (graphicsRequirements.minApiVersionSupported > XR_MAKE_VERSION(nMajor, nMinor, 0))
+		if (!InitVulkan(graphicsRequirements))
 		{
-			::MessageBoxA(m_hWnd, "The OpenXR runtime requires a newer OpenGL version.", "OpenXR Error", MB_OK | MB_ICONERROR);
 			return false;
 		}
 	}
 
-	// Session (このウィンドウの GL コンテキストを渡す)
+	// Session (Vulkan のデバイスとキューを渡す)
 	{
-		XrGraphicsBindingOpenGLWin32KHR graphicsBinding{ XR_TYPE_GRAPHICS_BINDING_OPENGL_WIN32_KHR };
-		graphicsBinding.hDC = m_hDC;
-		graphicsBinding.hGLRC = m_hRC;
+		XrGraphicsBindingVulkan2KHR graphicsBinding{ XR_TYPE_GRAPHICS_BINDING_VULKAN2_KHR };
+		graphicsBinding.instance = m_vkInstance;
+		graphicsBinding.physicalDevice = m_physicalDevice;
+		graphicsBinding.device = m_device;
+		graphicsBinding.queueFamilyIndex = m_nQueueFamily;
+		graphicsBinding.queueIndex = 0;
 
 		XrSessionCreateInfo createInfo{ XR_TYPE_SESSION_CREATE_INFO };
 		createInfo.next = &graphicsBinding;
@@ -463,8 +710,7 @@ bool CMdkvView::InitVR()
 		}
 		if (nViewCount != Eye_Count)
 		{
-			::MessageBoxA(m_hWnd, "Unexpected number of views.", "OpenXR Error", MB_OK | MB_ICONERROR);
-			return false;
+			return ShowError("Unexpected number of views.");
 		}
 		m_views.assign(nViewCount, { XR_TYPE_VIEW });
 	}
@@ -484,12 +730,8 @@ void CMdkvView::TermVR()
 		xrDestroySession(m_session);
 		m_session = XR_NULL_HANDLE;
 	}
-	if (m_instance != XR_NULL_HANDLE)
-	{
-		xrDestroyInstance(m_instance);
-		m_instance = XR_NULL_HANDLE;
-	}
 	m_bSessionRunning = false;
+	// XrInstance は Vulkan のインスタンスより後に TermVulkan で破棄する
 }
 
 void CMdkvView::ProcessVREvents()
@@ -567,17 +809,23 @@ bool CMdkvView::UpdateHMDMatrixPose(XrTime predictedDisplayTime)
 	return true;
 }
 
-// 左右上下で非対称な視野角から OpenGL の射影行列を作る
+// 左右上下で非対称な視野角から Vulkan 用の射影行列 (深度 0..1、Y 軸下向き) を作る
 glm::mat4 CMdkvView::GetHMDMatrixProjectionEye(EEye nEye)
 {
 	const XrFovf& fov = m_views[nEye].fov;
-	return glm::frustum(
+	glm::mat4 mat = glm::frustumRH_ZO(
 		m_fNearClip * tanf(fov.angleLeft),
 		m_fNearClip * tanf(fov.angleRight),
 		m_fNearClip * tanf(fov.angleDown),
 		m_fNearClip * tanf(fov.angleUp),
 		m_fNearClip,
 		m_fFarClip);
+	// クリップ座標の Y を反転する (非対称な視野角では [1][1] だけでなく行全体を反転する)
+	for (int col = 0; col < 4; col++)
+	{
+		mat[col][1] = -mat[col][1];
+	}
+	return mat;
 }
 
 // 目の姿勢 (アプリ空間) の逆行列 = view matrix
@@ -605,8 +853,9 @@ glm::mat4 CMdkvView::ConvertXrPose(const XrPosef& pose)
 bool CMdkvView::SetupStereoRenderTargets()
 {
 	// swapchain のフォーマットを選ぶ。
-	// シーンはガンマ空間の値で描いているので、sRGB フォーマットにそのままコピーして
-	// ランタイムに「sRGB エンコード済み」として扱わせる。無ければ RGBA8 を使う。
+	// シーンはガンマ空間の値で描いているので、UNORM で描いた値を sRGB の swapchain にそのままコピーして
+	// ランタイムに「sRGB エンコード済み」として扱わせる。vkCmdCopyImage は値を変換しないので、
+	// 描画用の形式は swapchain と同じ並び (RGBA / BGRA) の UNORM にする。
 	uint32_t nCount = 0;
 	XrResult result = xrEnumerateSwapchainFormats(m_session, 0, &nCount, nullptr);
 	if (XR_FAILED(result))
@@ -620,26 +869,35 @@ bool CMdkvView::SetupStereoRenderTargets()
 		return ShowXrError(result, "xrEnumerateSwapchainFormats");
 	}
 
-	const int64_t preferredFormats[] = { GL_SRGB8_ALPHA8, GL_RGBA8 };
+	const struct { VkFormat swapchain; VkFormat render; } preferredFormats[] = {
+		{ VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM },
+		{ VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM },
+		{ VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM },
+		{ VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_B8G8R8A8_UNORM },
+	};
 	m_nColorSwapchainFormat = 0;
-	for (int64_t format : preferredFormats)
+	for (const auto& pair : preferredFormats)
 	{
-		if (std::find(formats.begin(), formats.end(), format) != formats.end())
+		if (std::find(formats.begin(), formats.end(), (int64_t)pair.swapchain) != formats.end())
 		{
-			m_nColorSwapchainFormat = format;
+			m_nColorSwapchainFormat = pair.swapchain;
+			m_colorFormat = pair.render;
 			break;
 		}
 	}
 	if (m_nColorSwapchainFormat == 0)
 	{
-		::MessageBoxA(m_hWnd, "No supported swapchain format.", "OpenXR Error", MB_OK | MB_ICONERROR);
-		return false;
+		return ShowError("No supported swapchain format.");
 	}
 
 	// 左右で推奨サイズが違う場合に備えて大きい方に合わせる
 	m_nRenderWidth = (std::max)(m_configViews[Eye_Left].recommendedImageRectWidth, m_configViews[Eye_Right].recommendedImageRectWidth);
 	m_nRenderHeight = (std::max)(m_configViews[Eye_Left].recommendedImageRectHeight, m_configViews[Eye_Right].recommendedImageRectHeight);
 
+	if (!CreateRenderPass())
+	{
+		return false;
+	}
 	if (!CreateFrameBuffer(m_nRenderWidth, m_nRenderHeight, m_leftEyeDesc))
 	{
 		return false;
@@ -653,48 +911,59 @@ bool CMdkvView::SetupStereoRenderTargets()
 
 bool CMdkvView::CreateFrameBuffer(int nWidth, int nHeight, FramebufferDesc& desc)
 {
-	// MSAA 描画用
-	glGenFramebuffers(1, &desc.m_nRenderFramebufferId);
-	glBindFramebuffer(GL_FRAMEBUFFER, desc.m_nRenderFramebufferId);
+	const bool bMultisample = m_samples != VK_SAMPLE_COUNT_1_BIT;
 
-	glGenRenderbuffers(1, &desc.m_nDepthBufferId);
-	glBindRenderbuffer(GL_RENDERBUFFER, desc.m_nDepthBufferId);
-	glRenderbufferStorageMultisample(GL_RENDERBUFFER, 4, GL_DEPTH_COMPONENT, nWidth, nHeight);
-	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, desc.m_nDepthBufferId);
-
-	glGenTextures(1, &desc.m_nRenderTextureId);
-	glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, desc.m_nRenderTextureId);
-	glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, 4, GL_RGBA8, nWidth, nHeight, true);
-	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D_MULTISAMPLE, desc.m_nRenderTextureId, 0);
-
-	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+	// MSAA 描画用 (resolve した後は不要なので TRANSIENT)
+	if (bMultisample)
 	{
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);
-		return false;
+		if (!CreateImage(m_colorFormat, m_samples, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT,
+			VK_IMAGE_ASPECT_COLOR_BIT, &desc.m_renderImage, &desc.m_renderMemory, &desc.m_renderImageView))
+		{
+			return ShowError("Failed to create the MSAA color buffer.");
+		}
+	}
+	if (!CreateImage(m_depthFormat, m_samples, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT,
+		VK_IMAGE_ASPECT_DEPTH_BIT, &desc.m_depthImage, &desc.m_depthMemory, &desc.m_depthImageView))
+	{
+		return ShowError("Failed to create the depth buffer.");
+	}
+	// resolve 先 (swapchain へのコピー元とコンパニオンウィンドウ表示)
+	if (!CreateImage(m_colorFormat, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+		VK_IMAGE_ASPECT_COLOR_BIT, &desc.m_resolveImage, &desc.m_resolveMemory, &desc.m_resolveImageView))
+	{
+		return ShowError("Failed to create the resolve buffer.");
 	}
 
-	// resolve 用 (コンパニオンウィンドウ表示と swapchain へのコピー元)
-	glGenFramebuffers(1, &desc.m_nResolveFramebufferId);
-	glBindFramebuffer(GL_FRAMEBUFFER, desc.m_nResolveFramebufferId);
-
-	glGenTextures(1, &desc.m_nResolveTextureId);
-	glBindTexture(GL_TEXTURE_2D, desc.m_nResolveTextureId);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, nWidth, nHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, desc.m_nResolveTextureId, 0);
-
-	GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-	if (status != GL_FRAMEBUFFER_COMPLETE)
+	// CreateRenderPass のアタッチメントの並び (色, 深度, resolve 先) に合わせる
+	VkImageView views[3];
+	uint32_t nViewCount = 0;
+	if (bMultisample)
 	{
-		return false;
+		views[0] = desc.m_renderImageView;
+		views[1] = desc.m_depthImageView;
+		views[2] = desc.m_resolveImageView;
+		nViewCount = 3;
+	}
+	else
+	{
+		views[0] = desc.m_resolveImageView;
+		views[1] = desc.m_depthImageView;
+		nViewCount = 2;
+	}
+	VkFramebufferCreateInfo framebufferInfo = {};
+	framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+	framebufferInfo.renderPass = m_renderPass;
+	framebufferInfo.attachmentCount = nViewCount;
+	framebufferInfo.pAttachments = views;
+	framebufferInfo.width = nWidth;
+	framebufferInfo.height = nHeight;
+	framebufferInfo.layers = 1;
+	if (vkCreateFramebuffer(m_device, &framebufferInfo, NULL, &desc.m_framebuffer) != VK_SUCCESS)
+	{
+		return ShowError("vkCreateFramebuffer failed.");
 	}
 
-	// swapchain image を貼り付ける FBO (毎フレーム取得した image を attach する)
-	glGenFramebuffers(1, &desc.m_nSwapchainFramebufferId);
-
-	// OpenXR swapchain
+	// OpenXR swapchain (resolve 先からコピーで書き込む)
 	XrSwapchainCreateInfo createInfo{ XR_TYPE_SWAPCHAIN_CREATE_INFO };
 	createInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
 	createInfo.format = m_nColorSwapchainFormat;
@@ -716,7 +985,7 @@ bool CMdkvView::CreateFrameBuffer(int nWidth, int nHeight, FramebufferDesc& desc
 	{
 		return ShowXrError(result, "xrEnumerateSwapchainImages");
 	}
-	desc.m_swapchainImages.assign(nImageCount, { XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_KHR });
+	desc.m_swapchainImages.assign(nImageCount, { XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR });
 	result = xrEnumerateSwapchainImages(desc.m_swapchain, nImageCount, &nImageCount,
 		reinterpret_cast<XrSwapchainImageBaseHeader*>(desc.m_swapchainImages.data()));
 	if (XR_FAILED(result))
@@ -735,123 +1004,96 @@ void CMdkvView::DeleteFrameBuffer(FramebufferDesc& desc)
 		desc.m_swapchain = XR_NULL_HANDLE;
 	}
 	desc.m_swapchainImages.clear();
+	desc.m_bAcquired = false;
 
-	glDeleteRenderbuffers(1, &desc.m_nDepthBufferId);
-	glDeleteTextures(1, &desc.m_nRenderTextureId);
-	glDeleteFramebuffers(1, &desc.m_nRenderFramebufferId);
-	glDeleteTextures(1, &desc.m_nResolveTextureId);
-	glDeleteFramebuffers(1, &desc.m_nResolveFramebufferId);
-	glDeleteFramebuffers(1, &desc.m_nSwapchainFramebufferId);
-	desc.m_nDepthBufferId = 0;
-	desc.m_nRenderTextureId = 0;
-	desc.m_nRenderFramebufferId = 0;
-	desc.m_nResolveTextureId = 0;
-	desc.m_nResolveFramebufferId = 0;
-	desc.m_nSwapchainFramebufferId = 0;
+	vkDestroyFramebuffer(m_device, desc.m_framebuffer, NULL);
+	vkDestroyImageView(m_device, desc.m_resolveImageView, NULL);
+	vkDestroyImage(m_device, desc.m_resolveImage, NULL);
+	vkFreeMemory(m_device, desc.m_resolveMemory, NULL);
+	vkDestroyImageView(m_device, desc.m_renderImageView, NULL);
+	vkDestroyImage(m_device, desc.m_renderImage, NULL);
+	vkFreeMemory(m_device, desc.m_renderMemory, NULL);
+	vkDestroyImageView(m_device, desc.m_depthImageView, NULL);
+	vkDestroyImage(m_device, desc.m_depthImage, NULL);
+	vkFreeMemory(m_device, desc.m_depthMemory, NULL);
+	desc.m_framebuffer = VK_NULL_HANDLE;
+	desc.m_resolveImageView = VK_NULL_HANDLE;
+	desc.m_resolveImage = VK_NULL_HANDLE;
+	desc.m_resolveMemory = VK_NULL_HANDLE;
+	desc.m_renderImageView = VK_NULL_HANDLE;
+	desc.m_renderImage = VK_NULL_HANDLE;
+	desc.m_renderMemory = VK_NULL_HANDLE;
+	desc.m_depthImageView = VK_NULL_HANDLE;
+	desc.m_depthImage = VK_NULL_HANDLE;
+	desc.m_depthMemory = VK_NULL_HANDLE;
 }
 
-bool CMdkvView::SetupCompanionWindow()
-{
-	m_unCompanionProgramID = CMdkvScene::CreateProgram(IDR_COMPANION_VSHADER, IDR_COMPANION_FSHADER);
-	if (m_unCompanionProgramID == 0)
-	{
-		return false;
-	}
-
-	// 左半分に左目、右半分に右目
-	VertexDataWindow vVerts[] = {
-		// left eye
-		{ glm::vec2(-1, -1), glm::vec2(0, 0) },
-		{ glm::vec2( 0, -1), glm::vec2(1, 0) },
-		{ glm::vec2(-1,  1), glm::vec2(0, 1) },
-		{ glm::vec2( 0,  1), glm::vec2(1, 1) },
-		// right eye
-		{ glm::vec2( 0, -1), glm::vec2(0, 0) },
-		{ glm::vec2( 1, -1), glm::vec2(1, 0) },
-		{ glm::vec2( 0,  1), glm::vec2(0, 1) },
-		{ glm::vec2( 1,  1), glm::vec2(1, 1) },
-	};
-	GLushort vIndices[] = { 0, 1, 3,   0, 3, 2,   4, 5, 7,   4, 7, 6 };
-	m_nCompanionIndexSize = (GLsizei)_countof(vIndices);
-
-	glGenVertexArrays(1, &m_unCompanionVAO);
-	glBindVertexArray(m_unCompanionVAO);
-
-	glGenBuffers(1, &m_glCompanionVertBuffer);
-	glBindBuffer(GL_ARRAY_BUFFER, m_glCompanionVertBuffer);
-	glBufferData(GL_ARRAY_BUFFER, sizeof(vVerts), vVerts, GL_STATIC_DRAW);
-
-	glGenBuffers(1, &m_glCompanionIndexBuffer);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_glCompanionIndexBuffer);
-	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(vIndices), vIndices, GL_STATIC_DRAW);
-
-	glEnableVertexAttribArray(0);
-	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(VertexDataWindow), (void*)offsetof(VertexDataWindow, position));
-	glEnableVertexAttribArray(1);
-	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(VertexDataWindow), (void*)offsetof(VertexDataWindow, texCoord));
-
-	glBindVertexArray(0);
-	glBindBuffer(GL_ARRAY_BUFFER, 0);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
-
-	return true;
-}
-
+// m_commandBuffer に 1 つの目の描画と swapchain へのコピーを記録する
 bool CMdkvView::RenderEye(EEye nEye, FramebufferDesc& desc)
 {
-	const glm::mat4& matProjection = (nEye == Eye_Left) ? m_mat4ProjectionLeft : m_mat4ProjectionRight;
-
-	// シーンを MSAA バッファに描く
-	glEnable(GL_MULTISAMPLE);
-
-	glBindFramebuffer(GL_FRAMEBUFFER, desc.m_nRenderFramebufferId);
-	glViewport(0, 0, m_nRenderWidth, m_nRenderHeight);
-	glClearColor(0.0f, 0.0f, 0.4f, 1.0f);
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-	glEnable(GL_DEPTH_TEST);
-	glDepthFunc(GL_LESS);
-
-	m_pScene->Draw(matProjection, GetCurrentViewMatrix(nEye));
-
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-	glDisable(GL_MULTISAMPLE);
-
-	// MSAA -> resolve
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, desc.m_nRenderFramebufferId);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, desc.m_nResolveFramebufferId);
-	glBlitFramebuffer(0, 0, m_nRenderWidth, m_nRenderHeight, 0, 0, m_nRenderWidth, m_nRenderHeight, GL_COLOR_BUFFER_BIT, GL_LINEAR);
-
-	// resolve -> swapchain image
 	XrSwapchainImageAcquireInfo acquireInfo{ XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
-	uint32_t nImageIndex = 0;
-	if (XR_FAILED(xrAcquireSwapchainImage(desc.m_swapchain, &acquireInfo, &nImageIndex)))
+	if (XR_FAILED(xrAcquireSwapchainImage(desc.m_swapchain, &acquireInfo, &desc.m_nAcquiredIndex)))
 	{
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 		return false;
 	}
+	desc.m_bAcquired = true;	// 失敗しても ReleaseEyeImages で返す
 
 	XrSwapchainImageWaitInfo waitInfo{ XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
 	waitInfo.timeout = XR_INFINITE_DURATION;
-	bool bWaited = XR_SUCCEEDED(xrWaitSwapchainImage(desc.m_swapchain, &waitInfo));
-	if (bWaited)
+	if (XR_FAILED(xrWaitSwapchainImage(desc.m_swapchain, &waitInfo)))
 	{
-		// GL_FRAMEBUFFER_SRGB は無効のままなので、sRGB の swapchain にも値がそのままコピーされる
-		glBindFramebuffer(GL_READ_FRAMEBUFFER, desc.m_nResolveFramebufferId);
-		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, desc.m_nSwapchainFramebufferId);
-		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, desc.m_swapchainImages[nImageIndex].image, 0);
-		glBlitFramebuffer(0, 0, m_nRenderWidth, m_nRenderHeight, 0, 0, m_nRenderWidth, m_nRenderHeight, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+		return false;
 	}
 
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	const glm::mat4& matProjection = (nEye == Eye_Left) ? m_mat4ProjectionLeft : m_mat4ProjectionRight;
+	VkExtent2D extent = { m_nRenderWidth, m_nRenderHeight };
 
-	// acquire した image は必ず release する
-	XrSwapchainImageReleaseInfo releaseInfo{ XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
-	xrReleaseSwapchainImage(desc.m_swapchain, &releaseInfo);
+	// シーンを描く (MSAA → resolve 先。resolve 先は TRANSFER_SRC_OPTIMAL になる)
+	VkClearValue clearValues[3] = {};
+	clearValues[0].color = { { 0.0f, 0.0f, 0.4f, 1.0f } };
+	clearValues[1].depthStencil = { 1.0f, 0 };
+	VkRenderPassBeginInfo renderPassBegin = {};
+	renderPassBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+	renderPassBegin.renderPass = m_renderPass;
+	renderPassBegin.framebuffer = desc.m_framebuffer;
+	renderPassBegin.renderArea.extent = extent;
+	renderPassBegin.clearValueCount = (m_samples != VK_SAMPLE_COUNT_1_BIT) ? 3 : 2;
+	renderPassBegin.pClearValues = clearValues;
+	vkCmdBeginRenderPass(m_commandBuffer, &renderPassBegin, VK_SUBPASS_CONTENTS_INLINE);
 
-	return bWaited;
+	m_pScene->Draw(m_commandBuffer, extent, (uint32_t)nEye, matProjection, GetCurrentViewMatrix(nEye));
+
+	vkCmdEndRenderPass(m_commandBuffer);
+
+	// resolve 先 -> swapchain image (値をそのままコピーする)
+	VkImage swapchainImage = desc.m_swapchainImages[desc.m_nAcquiredIndex].image;
+	VkImageMemoryBarrier barrier = {};
+	barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.image = swapchainImage;
+	barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+	barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	barrier.srcAccessMask = 0;
+	barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	vkCmdPipelineBarrier(m_commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+
+	VkImageCopy region = {};
+	region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+	region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+	region.extent = { m_nRenderWidth, m_nRenderHeight, 1 };
+	vkCmdCopyImage(m_commandBuffer, desc.m_resolveImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		swapchainImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+	// OpenXR には COLOR_ATTACHMENT_OPTIMAL の状態で返す
+	barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+	vkCmdPipelineBarrier(m_commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+
+	return true;
 }
 
 bool CMdkvView::RenderStereoTargets(std::vector<XrCompositionLayerProjectionView>& projectionViews)
@@ -873,81 +1115,223 @@ bool CMdkvView::RenderStereoTargets(std::vector<XrCompositionLayerProjectionView
 		projectionViews[i].subImage.imageRect.offset = { 0, 0 };
 		projectionViews[i].subImage.imageRect.extent = { (int32_t)m_nRenderWidth, (int32_t)m_nRenderHeight };
 	}
+	m_bEyeRendered = true;
 	return true;
 }
 
-void CMdkvView::RenderCompanionWindow()
+// GPU にコマンドを投入した後で、取得した swapchain image を OpenXR に返す
+void CMdkvView::ReleaseEyeImages()
 {
-	glDisable(GL_DEPTH_TEST);
-	glViewport(0, 0, m_nWidth, m_nHeight);
-	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-	glBindVertexArray(m_unCompanionVAO);
-	glUseProgram(m_unCompanionProgramID);
-	glActiveTexture(GL_TEXTURE0);
-
 	FramebufferDesc* pDescs[Eye_Count] = { &m_leftEyeDesc, &m_rightEyeDesc };
-	for (int i = 0; i < Eye_Count; i++)
+	for (FramebufferDesc* pDesc : pDescs)
 	{
-		glBindTexture(GL_TEXTURE_2D, pDescs[i]->m_nResolveTextureId);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-		// インデックス配列の前半が左目、後半が右目
-		glDrawElements(GL_TRIANGLES, m_nCompanionIndexSize / 2, GL_UNSIGNED_SHORT,
-			(const void*)(uintptr_t)(i * (m_nCompanionIndexSize / 2) * sizeof(GLushort)));
+		if (pDesc->m_bAcquired)
+		{
+			XrSwapchainImageReleaseInfo releaseInfo{ XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+			xrReleaseSwapchainImage(pDesc->m_swapchain, &releaseInfo);
+			pDesc->m_bAcquired = false;
+		}
+	}
+}
+
+//-----------------------------------------------------------------------------
+// Companion window
+//-----------------------------------------------------------------------------
+bool CMdkvView::SetupCompanionWindow()
+{
+	if (!CreateSwapchain())
+	{
+		DestroySwapchain();	// 最小化中などで作れなくても、次の Draw でもう一度作る
+	}
+	return true;
+}
+
+bool CMdkvView::CreateSwapchain()
+{
+	VkSurfaceCapabilitiesKHR caps;
+	vkGetPhysicalDeviceSurfaceCapabilitiesKHR(m_physicalDevice, m_surface, &caps);
+	VkExtent2D extent = caps.currentExtent;
+	if (extent.width == 0xFFFFFFFF)
+	{
+		RECT rcClient;
+		::GetClientRect(m_hWnd, &rcClient);
+		extent.width = (std::max)(caps.minImageExtent.width, (std::min)(caps.maxImageExtent.width, (uint32_t)(rcClient.right - rcClient.left)));
+		extent.height = (std::max)(caps.minImageExtent.height, (std::min)(caps.maxImageExtent.height, (uint32_t)(rcClient.bottom - rcClient.top)));
+	}
+	if (extent.width == 0 || extent.height == 0)
+	{
+		return false;	// 最小化中は作れない
+	}
+	// 目の画像を vkCmdBlitImage で転送して表示する
+	if (!(caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT))
+	{
+		return false;
 	}
 
-	glBindVertexArray(0);
-	glUseProgram(0);
+	uint32_t nImageCount = caps.minImageCount + 1;
+	if (caps.maxImageCount > 0 && nImageCount > caps.maxImageCount)
+	{
+		nImageCount = caps.maxImageCount;
+	}
+	VkCompositeAlphaFlagBitsKHR compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+	if (!(caps.supportedCompositeAlpha & compositeAlpha))
+	{
+		compositeAlpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+	}
+
+	// フレームの同期は xrWaitFrame で取るので、表示で vsync を待たないモードを優先する
+	uint32_t nModeCount = 0;
+	vkGetPhysicalDeviceSurfacePresentModesKHR(m_physicalDevice, m_surface, &nModeCount, NULL);
+	std::vector<VkPresentModeKHR> presentModes(nModeCount);
+	vkGetPhysicalDeviceSurfacePresentModesKHR(m_physicalDevice, m_surface, &nModeCount, presentModes.data());
+	VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_KHR;
+	for (VkPresentModeKHR mode : { VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_IMMEDIATE_KHR })
+	{
+		if (std::find(presentModes.begin(), presentModes.end(), mode) != presentModes.end())
+		{
+			presentMode = mode;
+			break;
+		}
+	}
+
+	VkSwapchainCreateInfoKHR swapchainInfo = {};
+	swapchainInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+	swapchainInfo.surface = m_surface;
+	swapchainInfo.minImageCount = nImageCount;
+	swapchainInfo.imageFormat = m_surfaceFormat.format;
+	swapchainInfo.imageColorSpace = m_surfaceFormat.colorSpace;
+	swapchainInfo.imageExtent = extent;
+	swapchainInfo.imageArrayLayers = 1;
+	swapchainInfo.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	swapchainInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	swapchainInfo.preTransform = caps.currentTransform;
+	swapchainInfo.compositeAlpha = compositeAlpha;
+	swapchainInfo.presentMode = presentMode;
+	swapchainInfo.clipped = VK_TRUE;
+	if (vkCreateSwapchainKHR(m_device, &swapchainInfo, NULL, &m_swapchain) != VK_SUCCESS)
+	{
+		m_swapchain = VK_NULL_HANDLE;
+		return false;
+	}
+	m_extent = extent;
+
+	uint32_t nCount = 0;
+	vkGetSwapchainImagesKHR(m_device, m_swapchain, &nCount, NULL);
+	m_swapchainImages.resize(nCount);
+	vkGetSwapchainImagesKHR(m_device, m_swapchain, &nCount, m_swapchainImages.data());
+
+	// スワップチェーンのイメージごとに描画完了のセマフォを作る
+	VkSemaphoreCreateInfo semaphoreInfo = {};
+	semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+	m_renderFinished.resize(nCount, VK_NULL_HANDLE);
+	for (uint32_t i = 0; i < nCount; i++)
+	{
+		if (vkCreateSemaphore(m_device, &semaphoreInfo, NULL, &m_renderFinished[i]) != VK_SUCCESS)
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+void CMdkvView::DestroySwapchain()
+{
+	for (VkSemaphore semaphore : m_renderFinished)
+	{
+		vkDestroySemaphore(m_device, semaphore, NULL);
+	}
+	m_renderFinished.clear();
+	m_swapchainImages.clear();
+
+	// 仕様では NULL でもよいが、NULL を渡すと落ちるレイヤー (Bandicam など) があるので呼ばない
+	if (m_swapchain != VK_NULL_HANDLE)
+	{
+		vkDestroySwapchainKHR(m_device, m_swapchain, NULL);
+	}
+	m_swapchain = VK_NULL_HANDLE;
+}
+
+void CMdkvView::RecreateSwapchain()
+{
+	vkDeviceWaitIdle(m_device);
+	DestroySwapchain();
+	if (!CreateSwapchain())
+	{
+		DestroySwapchain();	// 次の Draw でもう一度作る
+	}
+}
+
+// m_commandBuffer に、左右の目の画像をウィンドウの左半分・右半分に転送するコマンドを記録する
+void CMdkvView::RenderCompanionWindow(uint32_t nImageIndex)
+{
+	VkImage image = m_swapchainImages[nImageIndex];
+
+	VkImageMemoryBarrier barrier = {};
+	barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.image = image;
+	barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+	barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	barrier.srcAccessMask = 0;
+	barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	vkCmdPipelineBarrier(m_commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+
+	if (m_bEyeRendered)
+	{
+		// resolve 先は描画後 TRANSFER_SRC_OPTIMAL のままになっている
+		FramebufferDesc* pDescs[Eye_Count] = { &m_leftEyeDesc, &m_rightEyeDesc };
+		int32_t nHalf = (int32_t)m_extent.width / 2;
+		for (int i = 0; i < Eye_Count; i++)
+		{
+			VkImageBlit blit = {};
+			blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+			blit.srcOffsets[0] = { 0, 0, 0 };
+			blit.srcOffsets[1] = { (int32_t)m_nRenderWidth, (int32_t)m_nRenderHeight, 1 };
+			blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+			blit.dstOffsets[0] = { i * nHalf, 0, 0 };
+			blit.dstOffsets[1] = { (i == 0) ? nHalf : (int32_t)m_extent.width, (int32_t)m_extent.height, 1 };
+			vkCmdBlitImage(m_commandBuffer, pDescs[i]->m_resolveImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+				image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+		}
+	}
+	else
+	{
+		// まだ一度も描いていないときは黒で塗る
+		VkClearColorValue black = { { 0.0f, 0.0f, 0.0f, 1.0f } };
+		VkImageSubresourceRange range = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+		vkCmdClearColorImage(m_commandBuffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
+	}
+
+	barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	barrier.dstAccessMask = 0;
+	vkCmdPipelineBarrier(m_commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
 }
 
 void CMdkvView::Draw()
 {
-	if (m_pScene == NULL || m_hDC == NULL || m_session == XR_NULL_HANDLE)
+	if (m_device == VK_NULL_HANDLE || m_pScene == NULL || m_session == XR_NULL_HANDLE)
 	{
 		return;
 	}
 
 	ProcessVREvents();
 
+	// OpenXR のフレームを始める
+	XrFrameState frameState{ XR_TYPE_FRAME_STATE };
+	bool bFrameBegun = false;
 	if (m_bSessionRunning)
 	{
 		XrFrameWaitInfo frameWaitInfo{ XR_TYPE_FRAME_WAIT_INFO };
-		XrFrameState frameState{ XR_TYPE_FRAME_STATE };
-		if (XR_FAILED(xrWaitFrame(m_session, &frameWaitInfo, &frameState)))
+		if (XR_SUCCEEDED(xrWaitFrame(m_session, &frameWaitInfo, &frameState)))
 		{
-			return;
+			XrFrameBeginInfo frameBeginInfo{ XR_TYPE_FRAME_BEGIN_INFO };
+			bFrameBegun = XR_SUCCEEDED(xrBeginFrame(m_session, &frameBeginInfo));
 		}
-
-		XrFrameBeginInfo frameBeginInfo{ XR_TYPE_FRAME_BEGIN_INFO };
-		if (XR_FAILED(xrBeginFrame(m_session, &frameBeginInfo)))
-		{
-			return;
-		}
-
-		std::vector<XrCompositionLayerBaseHeader*> layers;
-		XrCompositionLayerProjection layer{ XR_TYPE_COMPOSITION_LAYER_PROJECTION };
-		std::vector<XrCompositionLayerProjectionView> projectionViews;
-		if (frameState.shouldRender == XR_TRUE &&
-			UpdateHMDMatrixPose(frameState.predictedDisplayTime) &&
-			RenderStereoTargets(projectionViews))
-		{
-			layer.space = m_appSpace;
-			layer.viewCount = (uint32_t)projectionViews.size();
-			layer.views = projectionViews.data();
-			layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&layer));
-		}
-
-		// xrBeginFrame したら、描画しなかったフレームも xrEndFrame で閉じる
-		XrFrameEndInfo frameEndInfo{ XR_TYPE_FRAME_END_INFO };
-		frameEndInfo.displayTime = frameState.predictedDisplayTime;
-		frameEndInfo.environmentBlendMode = m_blendMode;
-		frameEndInfo.layerCount = (uint32_t)layers.size();
-		frameEndInfo.layers = layers.data();
-		xrEndFrame(m_session, &frameEndInfo);
 	}
 	else
 	{
@@ -955,6 +1339,97 @@ void CMdkvView::Draw()
 		::Sleep(50);
 	}
 
-	RenderCompanionWindow();
-	::SwapBuffers(m_hDC);
+	// 前のフレームの GPU 処理が終わるのを待つ (コマンドバッファとユニフォームバッファを使い回すため)
+	vkWaitForFences(m_device, 1, &m_inFlight, VK_TRUE, UINT64_MAX);
+
+	// コンパニオンウィンドウのイメージを取得する
+	if (m_swapchain == VK_NULL_HANDLE)
+	{
+		RecreateSwapchain();
+	}
+	uint32_t nCompanionIndex = 0;
+	bool bCompanion = false;
+	if (m_swapchain != VK_NULL_HANDLE)
+	{
+		VkResult result = vkAcquireNextImageKHR(m_device, m_swapchain, UINT64_MAX, m_imageAvailable, VK_NULL_HANDLE, &nCompanionIndex);
+		if (result == VK_ERROR_OUT_OF_DATE_KHR)
+		{
+			RecreateSwapchain();
+		}
+		else if (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR)
+		{
+			bCompanion = true;
+		}
+	}
+
+	// 両目の描画とコンパニオンウィンドウへの転送を 1 つのコマンドバッファに記録する
+	vkResetCommandBuffer(m_commandBuffer, 0);
+	VkCommandBufferBeginInfo beginInfo = {};
+	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	vkBeginCommandBuffer(m_commandBuffer, &beginInfo);
+
+	std::vector<XrCompositionLayerProjectionView> projectionViews;
+	bool bLayer = false;
+	if (bFrameBegun && frameState.shouldRender == XR_TRUE && UpdateHMDMatrixPose(frameState.predictedDisplayTime))
+	{
+		bLayer = RenderStereoTargets(projectionViews);
+	}
+	if (bCompanion)
+	{
+		RenderCompanionWindow(nCompanionIndex);
+	}
+
+	vkEndCommandBuffer(m_commandBuffer);
+
+	vkResetFences(m_device, 1, &m_inFlight);
+	VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+	VkSubmitInfo submitInfo = {};
+	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	submitInfo.waitSemaphoreCount = bCompanion ? 1 : 0;
+	submitInfo.pWaitSemaphores = &m_imageAvailable;
+	submitInfo.pWaitDstStageMask = &waitStage;
+	submitInfo.commandBufferCount = 1;
+	submitInfo.pCommandBuffers = &m_commandBuffer;
+	submitInfo.signalSemaphoreCount = bCompanion ? 1 : 0;
+	submitInfo.pSignalSemaphores = bCompanion ? &m_renderFinished[nCompanionIndex] : NULL;
+	vkQueueSubmit(m_queue, 1, &submitInfo, m_inFlight);
+
+	// コマンドを投入したので、swapchain image を OpenXR に返す
+	ReleaseEyeImages();
+
+	if (bCompanion)
+	{
+		VkPresentInfoKHR presentInfo = {};
+		presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+		presentInfo.waitSemaphoreCount = 1;
+		presentInfo.pWaitSemaphores = &m_renderFinished[nCompanionIndex];
+		presentInfo.swapchainCount = 1;
+		presentInfo.pSwapchains = &m_swapchain;
+		presentInfo.pImageIndices = &nCompanionIndex;
+		VkResult result = vkQueuePresentKHR(m_queue, &presentInfo);
+		if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
+		{
+			RecreateSwapchain();
+		}
+	}
+
+	// xrBeginFrame したら、描画しなかったフレームも xrEndFrame で閉じる
+	if (bFrameBegun)
+	{
+		XrCompositionLayerProjection layer{ XR_TYPE_COMPOSITION_LAYER_PROJECTION };
+		std::vector<XrCompositionLayerBaseHeader*> layers;
+		if (bLayer)
+		{
+			layer.space = m_appSpace;
+			layer.viewCount = (uint32_t)projectionViews.size();
+			layer.views = projectionViews.data();
+			layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&layer));
+		}
+		XrFrameEndInfo frameEndInfo{ XR_TYPE_FRAME_END_INFO };
+		frameEndInfo.displayTime = frameState.predictedDisplayTime;
+		frameEndInfo.environmentBlendMode = m_blendMode;
+		frameEndInfo.layerCount = (uint32_t)layers.size();
+		frameEndInfo.layers = layers.data();
+		xrEndFrame(m_session, &frameEndInfo);
+	}
 }

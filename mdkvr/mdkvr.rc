@@ -60,15 +60,7 @@ IDI_ICON1               ICON                    "res\\mdkvr.ico"
 // TEXTFILE
 //
 
-IDR_SCENE_VSHADER       TEXTFILE                "res\\scene.vert"
-
-IDR_SCENE_FSHADER       TEXTFILE                "res\\scene.frag"
-
 IDR_CUBE_OBJ            TEXTFILE                "res\\cube.txt"
-
-IDR_COMPANION_VSHADER   TEXTFILE                "res\\companion.vert"
-
-IDR_COMPANION_FSHADER   TEXTFILE                "res\\companion.frag"
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -78,6 +70,11 @@ IDR_COMPANION_FSHADER   TEXTFILE                "res\\companion.frag"
 
 IDR_CUBE_TGA            RCDATA                  "res\\Cube.tga"
 
+// シェーダーはビルド時に glslc で $(IntDir) に SPIR-V を出力し、それを埋め込む
+IDR_SCENE_VSHADER       RCDATA                  "scene.vert.spv"
+
+IDR_SCENE_FSHADER       RCDATA                  "scene.frag.spv"
+
 
 /////////////////////////////////////////////////////////////////////////////
 //
@@ -85,8 +82,8 @@ IDR_CUBE_TGA            RCDATA                  "res\\Cube.tga"
 //
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,0,2,0
- PRODUCTVERSION 0,0,2,0
+ FILEVERSION 0,0,3,0
+ PRODUCTVERSION 0,0,3,0
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -103,12 +100,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "matsuda.dkobo"
             VALUE "FileDescription", "vr sample"
-            VALUE "FileVersion", "0.0.2.0"
+            VALUE "FileVersion", "0.0.3.0"
             VALUE "InternalName", "mdkvr.exe"
             VALUE "LegalCopyright", "Copyright (C) 2026"
             VALUE "OriginalFilename", "mdkvr.exe"
             VALUE "ProductName", "mdkvr"
-            VALUE "ProductVersion", "0.0.2.0"
+            VALUE "ProductVersion", "0.0.3.0"
         END
     END
     BLOCK "VarFileInfo"

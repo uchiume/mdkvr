@@ -1,12 +1,12 @@
 #ifndef MDKVVIEW_H
 #define MDKVVIEW_H
 
-#include <GL/glew.h>
+#include <vulkan/vulkan.h>
 #include <glm/glm.hpp>
 #include <vector>
 
 #define XR_USE_PLATFORM_WIN32
-#define XR_USE_GRAPHICS_API_OPENGL
+#define XR_USE_GRAPHICS_API_VULKAN
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 
@@ -31,20 +31,33 @@ private:
 		Eye_Count = 2,
 	};
 
+	// 目ごとの描画先
 	struct FramebufferDesc
 	{
-		GLuint m_nDepthBufferId;
-		GLuint m_nRenderTextureId;
-		GLuint m_nRenderFramebufferId;
-		GLuint m_nResolveTextureId;
-		GLuint m_nResolveFramebufferId;
-		GLuint m_nSwapchainFramebufferId;		// swapchain image を貼り付けて blit する先
+		VkImage m_depthImage;			// MSAA 深度
+		VkDeviceMemory m_depthMemory;
+		VkImageView m_depthImageView;
+		VkImage m_renderImage;			// MSAA 色
+		VkDeviceMemory m_renderMemory;
+		VkImageView m_renderImageView;
+		VkImage m_resolveImage;			// resolve 先 (swapchain へのコピー元、コンパニオンウィンドウ表示)
+		VkDeviceMemory m_resolveMemory;
+		VkImageView m_resolveImageView;
+		VkFramebuffer m_framebuffer;
 		XrSwapchain m_swapchain;
-		std::vector<XrSwapchainImageOpenGLKHR> m_swapchainImages;
+		std::vector<XrSwapchainImageVulkan2KHR> m_swapchainImages;
+		uint32_t m_nAcquiredIndex;
+		bool m_bAcquired;				// xrAcquireSwapchainImage 済みで、まだ release していない
 	};
 
-	bool InitGL();
-	void TermGL();
+	// Vulkan
+	bool InitVulkan(XrGraphicsRequirementsVulkan2KHR& requirements);
+	void TermVulkan();
+	bool CreateRenderPass();
+	bool CreateImage(VkFormat format, VkSampleCountFlagBits samples, VkImageUsageFlags usage, VkImageAspectFlags aspect,
+		VkImage* pImage, VkDeviceMemory* pMemory, VkImageView* pView);
+	uint32_t FindMemoryType(uint32_t nTypeBits, VkMemoryPropertyFlags properties);
+	bool ShowError(const char* pszMessage);
 
 	// XR
 	bool InitVR();
@@ -61,18 +74,46 @@ private:
 	bool SetupStereoRenderTargets();
 	bool CreateFrameBuffer(int nWidth, int nHeight, FramebufferDesc& desc);
 	void DeleteFrameBuffer(FramebufferDesc& desc);
-	bool SetupCompanionWindow();
 	bool RenderStereoTargets(std::vector<XrCompositionLayerProjectionView>& projectionViews);
 	bool RenderEye(EEye nEye, FramebufferDesc& desc);
-	void RenderCompanionWindow();
+	void ReleaseEyeImages();
+
+	// Companion window (Vulkan のスワップチェーン)
+	bool SetupCompanionWindow();
+	bool CreateSwapchain();
+	void DestroySwapchain();
+	void RecreateSwapchain();
+	void RenderCompanionWindow(uint32_t nImageIndex);
 
 	HWND m_hWnd;
-	HDC m_hDC;
-	HGLRC m_hRC;
 	CMdkvScene* m_pScene;
 
-	int m_nWidth;	// companion window client size
+	int m_nWidth;	// companion window size
 	int m_nHeight;
+
+	// Vulkan
+	VkInstance m_vkInstance;
+	VkSurfaceKHR m_surface;
+	VkPhysicalDevice m_physicalDevice;
+	VkDevice m_device;
+	uint32_t m_nQueueFamily;
+	VkQueue m_queue;
+	VkSurfaceFormatKHR m_surfaceFormat;
+	VkFormat m_depthFormat;
+	VkFormat m_colorFormat;				// 目ごとの描画に使う形式 (swapchain と同じ並びの UNORM)
+	VkSampleCountFlagBits m_samples;
+	VkRenderPass m_renderPass;
+	VkCommandPool m_commandPool;
+	VkCommandBuffer m_commandBuffer;
+	VkSemaphore m_imageAvailable;
+	VkFence m_inFlight;
+	bool m_bEyeRendered;				// resolve 画像に一度でも描いたか
+
+	// ウィンドウサイズが変わったら作り直すもの
+	VkSwapchainKHR m_swapchain;
+	VkExtent2D m_extent;
+	std::vector<VkImage> m_swapchainImages;
+	std::vector<VkSemaphore> m_renderFinished;
 
 	// OpenXR
 	XrInstance m_instance;
@@ -98,12 +139,6 @@ private:
 	uint32_t m_nRenderHeight;
 	FramebufferDesc m_leftEyeDesc;
 	FramebufferDesc m_rightEyeDesc;
-
-	GLuint m_unCompanionProgramID;
-	GLuint m_unCompanionVAO;
-	GLuint m_glCompanionVertBuffer;
-	GLuint m_glCompanionIndexBuffer;
-	GLsizei m_nCompanionIndexSize;
 };
 
 #endif

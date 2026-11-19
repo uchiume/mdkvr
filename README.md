@@ -1,33 +1,34 @@
 # MDKVR
 
-A small VR viewer for Windows, built with OpenXR and OpenGL.
+A small VR viewer for Windows, built with OpenXR and Vulkan.
 It loads an OBJ model with a TGA texture and shows it in front of the HMD.
 
-The OpenXR flow follows the official sample [hello_xr](https://github.com/KhronosGroup/OpenXR-SDK-Source/tree/main/src/tests/hello_xr), but uses only the Win32 API and WGL, without the sample's platform/graphics plugin layers.
+The OpenXR flow follows the official sample [hello_xr](https://github.com/KhronosGroup/OpenXR-SDK-Source/tree/main/src/tests/hello_xr), but uses only the Win32 API, without the sample's platform/graphics plugin layers.
 
 ## Features
 
-- Stereo rendering (4x MSAA) submitted to the OpenXR runtime as a projection layer
+- Stereo rendering with Vulkan (4x MSAA when supported) submitted to the OpenXR runtime as a projection layer
+- Vulkan instance and device created through `XR_KHR_vulkan_enable2`, on the GPU the runtime selects
 - View updated from the per-eye poses returned by `xrLocateViews` every frame
 - Companion window on the desktop showing the left and right eye images side by side
 - OBJ model loading (triangle and quad faces in `v/vt/vn`, `v//vn` and `v/vt` formats)
 - 32-bit TGA texture loading (uncompressed and RLE)
-- Shaders, model and texture embedded in the executable as resources
+- Shaders (compiled to SPIR-V at build time), model and texture embedded in the executable as resources
 
 Controller rendering and input handling are not implemented yet.
 
 ## Requirements
 
 - Windows 10 / 11 (x64)
-- A GPU supporting OpenGL 3.3 or later
-- An OpenXR runtime that supports `XR_KHR_opengl_enable` (for example SteamVR), set as the active runtime, and a compatible HMD
+- A GPU and driver supporting Vulkan 1.0 or later
+- An OpenXR runtime that supports `XR_KHR_vulkan_enable2` (for example SteamVR), set as the active runtime, and a compatible HMD
 
 ## Building
 
 ### Prerequisites
 
 - Visual Studio 2022 (v143 toolset, "Desktop development with C++" workload)
-- [GLEW](https://github.com/nigels-com/glew) (Windows binaries)
+- [Vulkan SDK](https://vulkan.lunarg.com/) (the installer sets the `VULKAN_SDK` environment variable, which the project uses for headers, `vulkan-1.lib` and `glslc`)
 - [GLM](https://github.com/g-truc/glm)
 - [OpenXR SDK Source](https://github.com/KhronosGroup/OpenXR-SDK-Source), built with CMake into `OpenXR/build` with the default static loader (`DYNAMIC_LOADER=OFF`)
 
@@ -54,18 +55,14 @@ projects/
 │           ├─ Debug/         (openxr_loaderd.lib)
 │           └─ Release/       (openxr_loader.lib)
 └─ thirdparty/
-    ├─ glm/                   (glm/glm.hpp)
-    └─ glew/
-        ├─ include/           (GL/glew.h)
-        ├─ lib/Release/x64/   (glew32.lib)
-        └─ bin/Release/x64/   (glew32.dll)
+    └─ glm/                   (glm/glm.hpp)
 ```
 
 ### Steps
 
 1. Open `mdkvr.sln` in Visual Studio.
 2. Select `Debug | x64` or `Release | x64` and build.
-3. A post-build event copies `glew32.dll` next to the executable (`x64\Debug` or `x64\Release`). The OpenXR loader is linked statically, so no extra DLL is needed.
+3. The shaders are compiled to SPIR-V with `glslc` into the intermediate directory and embedded by the resource compiler. The OpenXR loader is linked statically and `vulkan-1.dll` comes with the GPU driver, so no extra DLL is needed next to the executable.
 
 From the command line:
 
@@ -90,8 +87,7 @@ The model and texture live in `mdkvr/res/` and are embedded via `mdkvr.rc`.
 | --- | --- |
 | `res/cube.txt` | Model in OBJ format |
 | `res/Cube.tga` | 32-bit TGA texture |
-| `res/scene.vert`, `res/scene.frag` | Shaders for the model |
-| `res/companion.vert`, `res/companion.frag` | Shaders for the companion window |
+| `res/scene.vert`, `res/scene.frag` | GLSL shaders for the model (compiled to SPIR-V at build time) |
 
 Replace the files and rebuild.
 The model's position and size are set by `m_Model` in `mdkvscene.cpp`, and the light position by `m_LightPos`.
@@ -101,12 +97,12 @@ The model's position and size are set by `m_Model` in `mdkvscene.cpp`, and the l
 | File | Role |
 | --- | --- |
 | `mdkvr.cpp` | Entry point and message loop |
-| `mdkvview.cpp` | Window, OpenGL context, OpenXR session, swapchains and stereo rendering |
-| `mdkvscene.cpp` | Loading and drawing the model, texture and shaders |
+| `mdkvview.cpp` | Window, Vulkan setup, OpenXR session, swapchains, stereo rendering and companion window |
+| `mdkvscene.cpp` | Loading the model and texture, Vulkan pipeline and drawing |
 
 ## License
 
 [MIT License](LICENSE)
 
-The dependencies (GLEW, GLM, OpenXR SDK) are not included in this repository.
+The dependencies (Vulkan SDK, GLM, OpenXR SDK) are not included in this repository.
 Obtain and use them under their own licenses.

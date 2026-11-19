@@ -48,24 +48,20 @@
     </ResourceCompile>
   </ItemGroup>
   <ItemGroup>
-    <None Include="res\companion.frag">
-      <Filter>リソース ファイル</Filter>
-    </None>
-    <None Include="res\companion.vert">
-      <Filter>リソース ファイル</Filter>
-    </None>
     <None Include="res\cube.txt">
       <Filter>リソース ファイル</Filter>
     </None>
     <None Include="res\Cube.tga">
       <Filter>リソース ファイル</Filter>
     </None>
-    <None Include="res\scene.frag">
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="res\scene.frag">
       <Filter>リソース ファイル</Filter>
-    </None>
-    <None Include="res\scene.vert">
+    </CustomBuild>
+    <CustomBuild Include="res\scene.vert">
       <Filter>リソース ファイル</Filter>
-    </None>
+    </CustomBuild>
   </ItemGroup>
   <ItemGroup>
     <Image Include="res\mdkvr.ico">

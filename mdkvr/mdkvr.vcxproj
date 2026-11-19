@@ -108,19 +108,19 @@
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>../../thirdparty/glm;../../thirdparty/glew/include;../../OpenXR/build/include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>../../thirdparty/glm;$(VULKAN_SDK)\Include;../../OpenXR/build/include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EntryPointSymbol>wmainCRTStartup</EntryPointSymbol>
-      <AdditionalLibraryDirectories>..\..\thirdparty\glew\lib\Release\x64;..\..\OpenXR\build\src\loader\Debug;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>glew32.lib;opengl32.lib;openxr_loaderd.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(VULKAN_SDK)\Lib;..\..\OpenXR\build\src\loader\Debug;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>vulkan-1.lib;openxr_loaderd.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
-    <PostBuildEvent>
-      <Command>copy /Y "$(ProjectDir)..\..\thirdparty\glew\bin\Release\x64\glew32.dll" "$(OutDir)"</Command>
-    </PostBuildEvent>
+    <ResourceCompile>
+      <AdditionalIncludeDirectories>$(IntDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -129,7 +129,7 @@
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>../../thirdparty/glm;../../thirdparty/glew/include;../../OpenXR/build/include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>../../thirdparty/glm;$(VULKAN_SDK)\Include;../../OpenXR/build/include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>Use</PrecompiledHeader>
@@ -138,12 +138,12 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>..\..\thirdparty\glew\lib\Release\x64;..\..\OpenXR\build\src\loader\Release;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>glew32.lib;opengl32.lib;openxr_loader.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(VULKAN_SDK)\Lib;..\..\OpenXR\build\src\loader\Release;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>vulkan-1.lib;openxr_loader.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
-    <PostBuildEvent>
-      <Command>copy /Y "$(ProjectDir)..\..\thirdparty\glew\bin\Release\x64\glew32.dll" "$(OutDir)"</Command>
-    </PostBuildEvent>
+    <ResourceCompile>
+      <AdditionalIncludeDirectories>$(IntDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="mdkvr.cpp" />
@@ -163,12 +163,20 @@
     <ClInclude Include="resource.h" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="res\companion.frag" />
-    <None Include="res\companion.vert" />
     <None Include="res\cube.txt" />
     <None Include="res\Cube.tga" />
-    <None Include="res\scene.frag" />
-    <None Include="res\scene.vert" />
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="res\scene.frag">
+      <Command>"$(VULKAN_SDK)\Bin\glslc.exe" "%(FullPath)" -o "$(IntDir)%(Filename)%(Extension).spv"</Command>
+      <Message>Compiling shader %(Filename)%(Extension)</Message>
+      <Outputs>$(IntDir)%(Filename)%(Extension).spv</Outputs>
+    </CustomBuild>
+    <CustomBuild Include="res\scene.vert">
+      <Command>"$(VULKAN_SDK)\Bin\glslc.exe" "%(FullPath)" -o "$(IntDir)%(Filename)%(Extension).spv"</Command>
+      <Message>Compiling shader %(Filename)%(Extension)</Message>
+      <Outputs>$(IntDir)%(Filename)%(Extension).spv</Outputs>
+    </CustomBuild>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="mdkvr.rc" />

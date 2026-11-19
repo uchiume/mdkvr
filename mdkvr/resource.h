@@ -7,8 +7,6 @@
 #define IDR_SCENE_FSHADER               103
 #define IDR_CUBE_OBJ                    104
 #define IDR_CUBE_TGA                    105
-#define IDR_COMPANION_VSHADER           106
-#define IDR_COMPANION_FSHADER           107
 
 // Next default values for new objects
 // 
